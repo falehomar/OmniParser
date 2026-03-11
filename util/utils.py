@@ -15,20 +15,41 @@ import sys
 import os
 import cv2
 import numpy as np
+import inspect
 # %matplotlib inline
 from matplotlib import pyplot as plt
 import easyocr
+os.environ.setdefault('PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK', 'True')
 from paddleocr import PaddleOCR
 reader = easyocr.Reader(['en'])
-paddle_ocr = PaddleOCR(
-    lang='en',  # other lang also available
-    use_angle_cls=False,
-    use_gpu=False,  # using cuda will conflict with pytorch in the same process
-    show_log=False,
-    max_batch_size=1024,
-    use_dilation=True,  # improves accuracy
-    det_db_score_mode='slow',  # improves accuracy
-    rec_batch_num=1024)
+
+
+def _create_paddle_ocr():
+    paddle_kwargs = {
+        'lang': 'en',
+        'use_angle_cls': False,
+        'show_log': False,
+        'max_batch_size': 1024,
+        'use_dilation': True,
+        'det_db_score_mode': 'slow',
+        'rec_batch_num': 1024,
+    }
+    signature = inspect.signature(PaddleOCR.__init__)
+    if 'use_gpu' in signature.parameters:
+        paddle_kwargs['use_gpu'] = False
+    if 'device' in signature.parameters:
+        paddle_kwargs['device'] = 'cpu'
+    supported_kwargs = {
+        key: value for key, value in paddle_kwargs.items()
+        if key in signature.parameters
+    }
+    try:
+        return PaddleOCR(**supported_kwargs)
+    except Exception:
+        return None
+
+
+paddle_ocr = _create_paddle_ocr()
 import time
 import base64
 
@@ -62,9 +83,19 @@ def get_caption_model_processor(model_name, model_name_or_path="Salesforce/blip2
         from transformers import AutoProcessor, AutoModelForCausalLM 
         processor = AutoProcessor.from_pretrained("microsoft/Florence-2-base", trust_remote_code=True)
         if device == 'cpu':
-            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float32, trust_remote_code=True)
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name_or_path,
+                dtype=torch.float32,
+                trust_remote_code=True,
+                attn_implementation='eager',
+            )
         else:
-            model = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=torch.float16, trust_remote_code=True).to(device)
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name_or_path,
+                dtype=torch.float16,
+                trust_remote_code=True,
+                attn_implementation='eager',
+            ).to(device)
     return {'model': model.to(device), 'processor': processor}
 
 
@@ -509,7 +540,7 @@ def check_ocr_box(image_source: Union[str, Image.Image], display_img = True, out
         image_source = image_source.convert('RGB')
     image_np = np.array(image_source)
     w, h = image_source.size
-    if use_paddleocr:
+    if use_paddleocr and paddle_ocr is not None:
         if easyocr_args is None:
             text_threshold = 0.5
         else:
